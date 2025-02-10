@@ -14,83 +14,167 @@ import {
 import { log } from "../utils/logger";
 import { ChatModel } from "../api/types";
 
+/**
+ * Handles messages received from the webview panel.
+ *
+ * @param {vscode.ExtensionContext} context - The VS Code extension context.
+ * @param {vscode.WebviewPanel} panel - The webview panel to communicate with.
+ * @param {any} msg - The message received from the webview.
+ */
+
 export async function handleWebviewMessage(
   context: vscode.ExtensionContext,
   panel: vscode.WebviewPanel,
   msg: any
-) {
-  switch (msg.type) {
-    case "fetchModels":
-      await handleFetchModels(context, panel);
-      break;
-    case "sendMessage":
-      await handleSendMessage(context, panel, msg);
-      break;
+): Promise<void> {
+  try {
+    switch (msg.type) {
+      case "fetchModels":
+        await handleFetchModels(context, panel);
+        break;
+      case "sendMessage":
+        await handleSendMessage(context, panel, msg);
+        break;
+      default:
+        log(`Unhandled message type: ${msg.type}`);
+        panel.webview.postMessage({
+          type: "error",
+          content: `Unhandled message type: ${msg.type}`,
+        });
+    }
+  } catch (error) {
+    log(`Error handling webview message: ${error}`);
+    panel.webview.postMessage({
+      type: "error",
+      content: `An unexpected error occurred: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    });
   }
 }
 
+/**
+ * Handles API errors and prompts the user to update the API key if necessary.
+ *
+ * @param {vscode.ExtensionContext} context - The VS Code extension context.
+ * @param {vscode.WebviewPanel} panel - The webview panel to communicate with.
+ * @param {any} error - The error object.
+ * @param {Function} retryCallback - The callback function to execute after updating the API key.
+ */
+async function handleApiError(
+  context: vscode.ExtensionContext,
+  panel: vscode.WebviewPanel,
+  error: any,
+  retryCallback: (newApiKey: string) => Promise<void>
+): Promise<void> {
+  log(`API Error: ${error}`);
+  if (error instanceof Error && error.message.includes("Invalid API key")) {
+    const selection = await vscode.window.showErrorMessage(
+      "Invalid qBraid API Key. Please update your API key.",
+      "Update API Key"
+    );
+    if (selection === "Update API Key") {
+      const newApiKey = await updateApiKey(context);
+      if (newApiKey) {
+        try {
+          await retryCallback(newApiKey);
+        } catch (retryErr) {
+          log(`Retry operation after API key update failed: ${retryErr}`);
+          panel.webview.postMessage({
+            type: "error",
+            content: `${
+              retryErr instanceof Error ? retryErr.message : String(retryErr)
+            }`,
+          });
+        }
+      }
+    }
+  } else {
+    panel.webview.postMessage({
+      type: "error",
+      content: `${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
+/**
+ * Fetches available chat models and sends them to the webview.
+ *
+ * @param {vscode.ExtensionContext} context - The VS Code extension context.
+ * @param {vscode.WebviewPanel} panel - The webview panel to communicate with.
+ */
 async function handleFetchModels(
   context: vscode.ExtensionContext,
   panel: vscode.WebviewPanel
-) {
-  // console.log("Starting handleSendMessage...");
+): Promise<void> {
   try {
     const apiKey = await getApiKey(context);
-    // console.log("API Key:", apiKey);
     if (!apiKey) {
-      // console.log("No API Key found.");
       panel.webview.postMessage({
         type: "error",
-        content: "API key not found.",
+        content: "API key not found. Please configure the qBraid API key.",
       });
       return;
     }
+
     const models = await fetchModels(apiKey);
     log(
       `Successfully fetched models: ${models.map((m) => m.model).join(", ")}`
     );
     panel.webview.postMessage({ type: "clearError" });
     panel.webview.postMessage({ type: "models", models });
-  } catch (err) {
-    log(`Failed to fetch models: ${err}`);
-    if (err instanceof Error && err.message.includes("Invalid API key")) {
-      const selection = await vscode.window.showErrorMessage(
-        "Invalid API Key.",
-        "Update API Key"
-      );
-      if (selection === "Update API Key") {
-        const newApiKey = await updateApiKey(context);
-        if (newApiKey) {
-          try {
-            const updatedModels = await fetchModels(newApiKey);
-            panel.webview.postMessage({ type: "clearError" });
-            panel.webview.postMessage({
-              type: "models",
-              models: updatedModels,
-            });
-            vscode.window.showInformationMessage(
-              "qBraid API Key updated and models fetched successfully."
-            );
-          } catch (retryErr) {
-            log(`Retry fetch models after API key update failed: ${retryErr}`);
-            panel.webview.postMessage({
-              type: "error",
-              content: `${
-                retryErr instanceof Error ? retryErr.message : String(retryErr)
-              }`,
-            });
-          }
-        }
-      }
-    } else {
+  } catch (error) {
+    log(`Failed to fetch models: ${error}`);
+    await handleApiError(context, panel, error, async (newApiKey: string) => {
+      const updatedModels = await fetchModels(newApiKey);
       panel.webview.postMessage({ type: "clearError" });
       panel.webview.postMessage({
-        type: "error",
-        content: `${err instanceof Error ? err.message : String(err)}`,
+        type: "models",
+        models: updatedModels,
       });
-    }
+      vscode.window.showInformationMessage(
+        "qBraid API Key updated and models fetched successfully."
+      );
+    });
   }
 }
+
+/**
+ * Handles the "sendMessage" action from the webview.
+ * This function processes user input, determines the appropriate action to take (based on LLM-generated plans),
+ * calls the relevant qBraid API, formats the response, and sends it back to the webview.
+ *
+ * @param {vscode.ExtensionContext} context - The VS Code extension context, used to access secrets and other resources.
+ * @param {vscode.WebviewPanel} panel - The webview panel used for communication between the extension and the UI.
+ * @param {any} msg - The message received from the webview. It contains user input and additional metadata.
+ *
+ * @throws {Error} - If an unexpected error occurs during execution.
+ *
+ * @description
+ * The function performs the following steps:
+ * 1. Retrieves the API key from secret storage. If not found, sends an error message to the webview.
+ * 2. Constructs a system prompt and sends it to an LLM (Language Model) to generate a plan of action in JSON format.
+ * 3. Parses the LLM's response to determine which qBraid API action to execute (e.g., `createJob`, `listJobs`, etc.).
+ * 4. Executes the corresponding API call based on the parsed plan and retrieves the raw response.
+ * 5. Formats the raw API response into a user-friendly format using natural language.
+ * 6. Sends the formatted response back to the webview for display.
+ *
+ * If an error occurs during execution:
+ * - Logs the error using the `log` function.
+ * - If the error is related to an invalid API key, prompts the user to update their API key via a VS Code input box.
+ * - Sends an error message back to the webview if any other issue occurs.
+ *
+ * @example
+ * // Example message from webview
+ * const msg = {
+ *   type: "sendMessage",
+ *   content: "List all quantum jobs",
+ *   model: "gpt-4o"
+ * };
+ *
+ * // Example usage
+ * await handleSendMessage(context, panel, msg);
+ */
 
 async function handleSendMessage(
   context: vscode.ExtensionContext,
@@ -278,7 +362,7 @@ ${rawApiResponse}
 
 Each field of JSON should not be printed as it is, it should be explained well.
 Please respond in natural language. Do not add characters like ** or anything. The response should be as natural as possible and make it much readable.Format them as much as possible foe visual appeal. Do NOT show raw JSON. Just produce a user-friendly reply. All new points should start on a new line and sub-sections should be aligned properly.
-  When showing multiple points you can use a table for each point. If anywhere in the response there is _id dont forget to mention it in the response.    `;
+If anywhere in the response there is _id dont forget to mention it in the response.    `;
     } else if (plan.action === "getModels") {
       const modelsList = (rawApiResponse as ChatModel[])
         .map(
@@ -299,7 +383,7 @@ Here is the raw API result:
 ${modelsList}... Each field of JSON should not be printed as it is, it should be explained well.
 The response should be as natural as possible and make it much readable.Format them as much as possible foe visual appeal. Do NOT show raw JSON. Just produce a user-friendly reply. All new points should start on a new line and sub-sections should be aligned properly.
 Please respond in natural language. Do not add characters like ** or anything. 
-When showing multiple points you can use a table for each point. If anywhere in the response there is _id dont forget to mention it in the response.
+If anywhere in the response there is _id dont forget to mention it in the response.
 
       `;
     } else {
@@ -312,8 +396,8 @@ Here is the raw API result:
 ${formattedHtml}
 
 Each field of JSON should not be printed as it is, it should be explained well. The response should be as natural as possible and make it much readable.Format them as much as possible foe visual appeal. Do NOT show raw JSON. Just produce a user-friendly reply. All new points should start on a new line and sub-sections should be aligned properly.
-Please respond in natural language. Do not add characters like ** or anything. 
-When showing multiple points you can use a table for each point. If anywhere in the response there is _id dont forget to mention it in the response.
+Please respond in natural language. Do not add extra special characters. Also give only 3-4 pieces of information like id, status, provider and anything necassary and avoid giving info like links and also give details of time it executed for. Give me in point format. Dont give any logo info. Whenever you give a new job info make sure you start in a new line.
+If anywhere in the response there is _id dont forget to mention it in the response.
 
       `;
     }
@@ -355,6 +439,13 @@ When showing multiple points you can use a table for each point. If anywhere in 
   }
 }
 
+/**
+ * Formats a JSON object into an HTML unordered list.
+ *
+ * @param {any} obj - The JSON object to format.
+ * @param {number} indent - The current indentation level.
+ * @returns {string} - The HTML representation of the JSON object.
+ */
 function formatJsonToHtml(obj: any, indent = 0): string {
   if (typeof obj === "object" && obj !== null) {
     let html = "<ul>";
@@ -377,7 +468,12 @@ function formatJsonToHtml(obj: any, indent = 0): string {
   }
 }
 
-// Helper function to escape HTML special characters
+/**
+ * Escapes HTML special characters in a string.
+ *
+ * @param {any} value - The value to escape.
+ * @returns {string} - The escaped string.
+ */
 function escapeHtml(value: any): string {
   if (typeof value !== "string") {
     return value;
