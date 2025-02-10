@@ -372,6 +372,15 @@ If anywhere in the response there is _id dont forget to mention it in the respon
   <li>Description: ${model.description}</li>
   <li>Pricing: ${model.pricing.input} input tokens, ${model.pricing.output} output tokens (${model.pricing.units})</li>
 </ul>
+
+for example this way 
+- gpt-4o-mini
+  - Description: A lightweight version of GPT-4.
+  - Pricing: $0.01 per 1,000 input tokens, $0.02 per 1,000 output tokens
+
+- gpt-4o
+  - Description: The full version of GPT-4.
+  - Pricing: $0.03 per 1,000 input tokens, $0.06 per 1,000 output tokens
       `
         )
         .join("");
@@ -395,10 +404,25 @@ We performed the action: ${actionDesc || "none"}.
 Here is the raw API result:
 ${formattedHtml}
 
-Each field of JSON should not be printed as it is, it should be explained well. The response should be as natural as possible and make it much readable.Format them as much as possible foe visual appeal. Do NOT show raw JSON. Just produce a user-friendly reply. All new points should start on a new line and sub-sections should be aligned properly.
-Please respond in natural language. Do not add extra special characters. Also give only 3-4 pieces of information like id, status, provider and anything necassary and avoid giving info like links and also give details of time it executed for. Give me in point format. Dont give any logo info. Whenever you give a new job info make sure you start in a new line.
-If anywhere in the response there is _id dont forget to mention it in the response.
-
+Please provide information about devices or systems in the following format.
+ Each device/system should be grouped together with its details clearly explained and 
+ formatted for readability. Avoid including unnecessary information like links or logos. 
+ Use natural language and avoid special characters like ** or -. 
+ Provide only 3-4 key pieces of information, such as ID, provider, status, and execution 
+ time. If there is an _id field in the data, make sure to include it in the response. 
+ Start each new device/system on a new line and align sub-sections properly. 
+ Ensure descriptions are concise and limited to 1-2 lines. 
+ Each device should be in its own box or table. Format as follows:
+[Device/System Name] |
+ID: [Unique Identifier] |
+Provider: [Name of Provider]|
+Status: [Online/Offline/Other Status]|
+Qubits: [Number of Qubits, if applicable]|
+Pending Jobs: [Number of Pending Jobs]|
+Execution Time: [Approximate Time Required for Execution]|
+Description: [Brief explanation in 1-2 lines]|
+After on device is done the rest of the remining space should be filled with dashes (--).
+Ensure all details of the same device/system are grouped together.
       `;
     }
 
